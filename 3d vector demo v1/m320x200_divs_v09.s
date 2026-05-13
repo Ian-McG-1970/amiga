@@ -1,0 +1,1522 @@
+
+CUSTOM	equ	$dff000
+
+SCREEN_HOR_MIDDLE EQU SCN_WIDTH/2
+SCREEN_VER_MIDDLE EQU SCN_HEIGHT/2
+
+CC_TOP		EQU 1
+CC_BOTTOM	EQU 2
+CC_LEFT 	EQU 4
+CC_RIGHT	EQU 8
+CC_BEHIND 	EQU 16
+CC_ON		EQU	0
+CC_OFF		EQU	31
+
+DMACON  equ	$096
+DMACONR	equ	$002
+
+INTENA 	equ	$09a
+INTENAR	equ	$01c
+
+INTREQ	equ	$09c
+INTREQR	equ	$01e
+
+ADKCON	equ	$09e
+ADKCONR	equ	$010
+
+COP1LCH	equ	$080
+COP2LCH equ	$084
+COPJMP1	equ	$088
+VPOSR	equ	$004
+
+BLTCON0	equ	$040
+BLTCON1 equ	$042
+BLTAFWM	equ	$044
+BLTALWM	equ	$046
+BLTCPTH equ	$048
+BLTAPTH	equ	$050
+BLTDPTH	equ	$054
+BLTSIZE	equ	$058
+BLTCON0L equ	$05A	; Blitter control 0, lower 8 bits (minterms)
+BLTCMOD equ	$060
+BLTBMOD equ	$062
+BLTAMOD equ	$064
+BLTDMOD equ	$066
+BLTBDAT equ	$072
+BLTADAT	equ 	$074
+
+Exec_Forbid		equ	-132
+Exec_Permit		equ	-138
+Exec_OpenLibrary	equ	-552
+Exec_CloseLibrary	equ	-414
+Exec_FindTask		equ	-294
+Exec_SetTaskPri		equ	-300
+
+Gfx_LoadView		equ	-222
+Gfx_WaitTOF		equ	-270
+Gfx_Field_ActiView	equ	34
+Gfx_Field_copinit	equ	38
+Gfx_Field_LOFlist	equ	50
+
+SCN_HEIGHT = 200
+SCN_WIDTH = 320
+NXT_LIN = SCN_WIDTH / 8 ; next line
+SCN_WIDTH_CHAR = 40
+
+STORE_USP_ON_STACK	macro
+			MOVE.L 	USP,A0
+			MOVE.L 	A0,-(A7) 		; store USP
+ 			endm
+
+RESTORE_USP_FROM_STACK	macro
+			MOVE.L 	(A7)+,A0
+			MOVE.L 	A0,USP		 	; restore USP
+			endm
+
+STORE_STACK_POINTER		macro
+			MOVE.L 	A7,STACK_POINTER	; store sp
+			ENDM
+
+RESTORE_STACK_POINTER	macro
+			MOVE.L 	STACK_POINTER,A7 	; restore sp
+			endm
+	
+BLITTER_WAIT	macro
+		inline
+.B_WAIT	BTST	#14,DMACONR(A6)		; wait for blitter ready
+		BNE.S	.B_WAIT
+		einline
+		endm
+
+VBL_WAIT		macro
+		inline
+.V_WAIT	MOVE.L	VPOSR(A1),D0				; wait for vertical blank
+		AND.L	#$0001ff00,D0
+		CMP.L	#$00012700,D0
+		BNE.S	.V_WAIT
+		einline
+		endm
+
+ADD_OFFSET	MACRO
+		MOVE.L 	XOFFSET,D3
+		ADD.L	D0,D3
+		MOVE.L 	D3,D0
+		MOVE.L 	YOFFSET,D3
+		ADD.L	D1,D3
+		MOVE.L 	D3,D1
+		MOVE.L 	ZOFFSET,D3
+		ADD.L	D2,D3
+		MOVE.L 	D3,D2
+	ENDM
+
+SIN_COS:	macro
+		LEA		sintab,a4
+		LEA		costab,a5
+
+		move.w	ophi,d1
+		add.w	d1,d1
+		move.w	(a4,d1.w),sphi
+		move.w	(a5,d1.w),cphi
+
+	endm
+
+; rotate around y-axis:
+;	x'' = x'*cos() + z*sin()
+;	z'' = x'*sin() - z*cos()
+
+;	MOVE.W	D0,D3 ; d4 = spare
+;	MOVE.W	D1,D4
+;	MOVE.W	D2,D5
+
+ROTATE_Y:	macro
+
+		move.w	d0,d3
+		muls.w	cphi,d0 ; x*cos()
+		add.l	d0,d0
+		swap	d0
+
+		move.w	d2,d4
+		muls.w	sphi,d4 ; z*sin()
+		add.l	d4,d4
+		swap	d4
+
+		add.w	d4,d0 ; x = x*cos() + z*sin()
+
+		muls.w 	sphi,d3	 ; x*sin()
+		add.l	d3,d3
+		swap	d3
+
+		muls.w	cphi,d2 ; z*cos()
+		add.l	d2,d2
+		swap	d2
+
+		sub.w	d2,d3
+		move.w	d3,d2 ; z = x*sin() - z*cos()
+
+	endm
+
+start:	MOVE.L 	$4.w,A6			; Switch to supervisor mode, because
+		LEA 	.get(PC),A5		; movec is a privileged instruction.
+		JSR 	-$1e(A6)  		; Supervisor()
+;   	BRA.S 	.store			;
+.get
+; 	MOVEC	vbr,d0			; (DC.L $4e7A0801)
+;   	RTE				;
+.store
+; 	MOVE.L 	d0,_vbr			; Store VBR
+
+;	MOVE.L	$4,A6
+
+		SUB.L	a1,a1				; zero - find current task
+		JSR		Exec_FindTask(A6)
+		MOVE.L	d0,a1				; set current task to high pri
+		MOVEQ	#127,d0
+		JSR		Exec_SetTaskPri(A6)
+
+		LEA		gfxname,a1
+		MOVEQ	#0,d0
+		JSR		Exec_OpenLibrary(A6)
+		TST.L	d0
+		BEQ		error
+		MOVE.L	d0,gfxbase
+
+		MOVE.L	d0,A6
+		MOVE.L	Gfx_Field_ActiView(A6),-(A7)	;	 store active view
+
+		SUB.L	a1,a1					; load zero view so we get default zero state 
+		JSR		Gfx_LoadView(A6)
+		JSR		Gfx_WaitTOF(A6)				; Wait for both long and short frame to finish
+		JSR		Gfx_WaitTOF(A6)
+
+		MOVE.L	$4,A6
+		JSR		Exec_Forbid(A6)
+
+		LEA		CUSTOM,a1
+		MOVE.W	DMACONR(a1),-(A7)		; save enabled dma channels
+		MOVE.W	INTENAR(a1),-(A7)		; save enabled interrupts
+		MOVE.W	#%0111111111111111,INTENA(A7)	; disable all interupts
+		MOVE.W	INTREQR(a1),-(A7)		; store current interrupt request bits
+		MOVE.W	ADKCONR(a1),-(A7)		; store current disk and sound control
+	
+		LEA		CUSTOM,A1
+		VBL_WAIT
+		
+		MOVE.L	#copperlist,COP1LCH(a1)
+		MOVE.W	#%0111111111111111,DMACON(a1)	; turn off all dma 
+		MOVE.W	#%1000011111000000,DMACON(a1)	; enable bitplane + copper + blitter dma
+		
+		MOVE.W	#0,ophi
+
+.LOOP:		LEA		CUSTOM,a1
+			VBL_WAIT
+			BSR		SWAP_SCN
+			
+			BSR		KEYBOARD
+	
+			LEA		CUSTOM+2,A6
+			BSR		DL_Init
+
+	moveq.L	#8-1,d7			; points
+	lea	objectpointlist,a0	; point list
+	moveq.L	#12-1,d1 ; #12-1,d1			;  #12-1
+	lea	objectlinelist,a1		; line list
+
+			BSR		DRAW_OBJECT
+
+			MOVE.L	ZOFFSET,D0
+			moveq.l	#0,d1
+			BSR		HEX32
+			MOVE.L	XOFFSET,D0
+			moveq.l	#9,d1
+			BSR		HEX32
+			MOVE.L	YOFFSET,D0
+			moveq.l	#18,d1
+			BSR		HEX32
+
+			MOVE.L	TEST_Z0,D0
+			move.l	#(6*40)+0,d1
+			BSR		HEX32
+			MOVE.L	TEST_X0,D0
+			move.l	#(6*40)+9,d1
+			BSR		HEX32
+			MOVE.L	TEST_Y0,D0
+			move.l	#(6*40)+18,d1
+			BSR		HEX32
+
+			MOVE.L	TEST_Z1,D0
+			move.l	#(12*40)+0,d1
+			BSR		HEX32
+			MOVE.L	TEST_X1,D0
+			move.l	#(12*40)+9,d1
+			BSR		HEX32
+			MOVE.L	TEST_Y1,D0
+			move.l	#(12*40)+18,d1
+			BSR		HEX32
+
+			MOVE.L	TEST_Z2,D0
+			move.l	#(18*40)+0,d1
+			BSR		HEX32
+			MOVE.L	TEST_X2,D0
+			move.l	#(18*40)+9,d1
+			BSR		HEX32
+			MOVE.L	TEST_Y2,D0
+			move.l	#(18*40)+18,d1
+			BSR		HEX32
+
+			MOVE.L	TEST_NUMBER_Z,D0
+			move.l	#(24*40)+0,d1
+			BSR		HEX32
+			MOVE.L	TEST_NUMBER_X,D0
+			move.l	#(24*40)+9,d1
+			BSR		HEX32
+			MOVE.L	TEST_NUMBER_Y,D0
+			move.l	#(24*40)+18,d1
+			BSR		HEX32
+			
+			BTST	#6,$bfe001                          ; left mouse button
+			BNE		.LOOP
+
+		LEA		CUSTOM,a1
+		VBL_WAIT
+
+		MOVE.L	gfxbase,A6
+		MOVE.L	Gfx_Field_copinit(A6),COP1LCH(a1)	; restore system copper list
+		MOVE.L	Gfx_Field_LOFlist(A6),COP2LCH(a1)
+
+		MOVE.W	#$8000,d1			; enable bit
+
+		MOVE.W	(A7)+,d0			; restore disk and sound control
+		OR.W	d1,d0
+		MOVE.W	d0,ADKCON(a1)
+
+		MOVE.W	(A7)+,d0			; restore interrupt request bits
+		OR.W	d1,d0
+		MOVE.W	d0,INTREQ(a1)
+
+		MOVE.W	(A7)+,d0			; restore enabled interrupts
+		OR.W	d1,d0
+		MOVE.W	d0,INTENA(a1)
+
+		MOVE.W	(A7)+,d0			; restore enabled dma channels
+		OR.W	d1,d0
+		MOVE.W	d0,DMACON(a1)
+
+		MOVE.L	$4,A6
+		JSR		Exec_Permit(A6)
+
+		MOVE.L	gfxbase,A6
+		MOVE.L	(A7)+,a1				; load stored active view
+		JSR		Gfx_LoadView(A6)
+		JSR		Gfx_WaitTOF(A6)
+		JSR		Gfx_WaitTOF(A6)
+
+		MOVE.L	$4,A6
+		MOVE.L	gfxbase,a1
+		JSR		Exec_CloseLibrary(A6)
+
+error:	MOVEQ.l		#0,d0
+		RTS
+
+gfxname:	DC.B	'graphics.library',0
+		even
+gfxbase:	DC.L	0
+
+; display the current one
+; flip to the next one
+; cLEAr the next one
+; draw on it
+	
+SWAP_SCN:	MOVE.L	mainscreenp,a1			; get current screen just drawn on and update copper list for next frame
+			MOVE.L	(a1),d0
+			LEA		mainbitp,A0
+			MOVE.W	d0,6(A0) 	; set bit plane 1
+			SWAP	d0
+			MOVE.W	d0,2(A0)
+			SWAP	d0
+	
+			MOVE.L	mainscreenp,d0	; next to be displayed		; shift the screens to the last drawn is at the end
+			MOVE.L	mainscreenp+4,a1  ; next to be drawn
+			MOVE.L	mainscreenp+8,d1  ; following after next
+	
+			MOVE.L	a1,mainscreenp 	; to be drawn on
+			MOVE.L	d1,mainscreenp+4 	; shuffle up
+			MOVE.L	d0,mainscreenp+8 	; next to be display - last to be updated
+
+			LEA		CUSTOM,A6 	; cLEAr next screen to be drawn
+			MOVE.L	mainscreenp+4,A0 	; +4,A0	; cLEAr the next screen not this screen
+			MOVE.L	(A0),A0		; address to cLEAr
+;			BSR		SCN_CLR
+
+;			RTS
+
+SCN_CLR:	MOVE.W	#$030,$180(A6)
+			BLITTER_WAIT
+			MOVE.W	#$300,$180(A6)
+
+			MOVE.L	A0,BLTDPTH(A6)	; screen address
+			MOVE.W	#0,BLTDMOD(A6)	; no modulo
+			MOVE.L	#%1000000000000000000000000,BLTCON0(A6)
+			MOVE.W	#((200*1)*64)+20,BLTSIZE(A6)	; screen height *64 + screen width in words
+	
+			BLITTER_WAIT
+			MOVE.W	#$000,$180(A6)
+			RTS
+
+KEYPRESS:	MOVE.B  $BFEC01,D0      ; Keypress
+			NOT.B   D0
+			ROR.B   #1,D0           ; d0 now contains the raw key
+			RTS
+
+KEYBOARD:	BSR		KEYPRESS
+			CMP.B	#$20,D0
+			BEQ.S	.KEY1
+			CMP.B	#$22,D0
+			BEQ.S	.KEY2
+			CMP.B	#$11,D0
+			BEQ.S	.KEY3
+			CMP.B	#$21,D0
+			BEQ.S	.KEY4
+			CMP.B	#$10,D0
+			BEQ.S	.KEY5
+			CMP.B	#$31,D0
+			BEQ.S	.KEY6
+			CMP.B	#7,D0
+			BEQ	.KEY7
+			CMP.B	#8,D0
+			BEQ	.KEY8
+			RTS
+.KEY1		MOVE.L	XOFFSET,D0
+			SUB.L	#555,D0
+			MOVE.L	D0,XOFFSET
+			RTS
+.KEY2		MOVE.L	XOFFSET,D0
+			ADD.L	#717,D0
+			MOVE.L	D0,XOFFSET
+			RTS
+.KEY3		MOVE.L	YOFFSET,D0
+			SUB.L	#717,D0
+			MOVE.L	D0,YOFFSET
+			RTS
+.KEY4		MOVE.L	YOFFSET,D0
+			ADD.L	#555,D0
+			MOVE.L	D0,YOFFSET
+			RTS
+.KEY5		MOVE.L	ZOFFSET,D0
+			ADD.L	#717,D0
+			MOVE.L	D0,ZOFFSET
+			RTS
+.KEY6		MOVE.L	ZOFFSET,D0
+			SUB.L	#555,D0
+			MOVE.L	D0,ZOFFSET
+			RTS
+.KEY7		MOVE.W	ophi,D0
+			SUBQ.B	#1,D0
+			MOVE.W	D0,ophi
+			RTS
+.KEY8		MOVE.W	ophi,D0
+			ADDQ.B	#1,D0
+			MOVE.W	D0,ophi
+			RTS
+
+DRAW_OBJECT	MOVEM.L	D1/A1,-(SP)				; put line details on stack
+
+			SIN_COS
+
+			LEA		ROTATED_POINT,A1		; store rotated point
+			LEA		PERSPECTIVE_POINT,A2	; store perspective point
+			LEA		CLIPCODE_POINT,A3		; store point clip code
+
+			MOVEQ.L	#CC_ON,D6 			; and clip code
+			MOVEQ.L	#CC_OFF,D5 			; or clip code
+	
+.POINT_LOOP:	MOVEM.W (A0)+,D0/D1/D2		; get point
+				ROTATE_Y				; do rotation
+				EXT.L D0
+				EXT.L D1
+				EXT.L D2
+
+				ADD_OFFSET					; add offsets
+				MOVEM.L	D0/D1/D2,(A1)		; store rotated point
+
+				TST.L	D2					; if z is positive
+				BPL.S	.PNT_FRONT
+					MOVEQ.L	#CC_BEHIND,D4	;  set clip code to behind
+					BRA.S	.PNT_OFF
+.PNT_FRONT:		BSR		CLIPCODE			; calc clip code
+				MOVE.B	D4,(A3)+				; store clipcode
+				AND.B	D4,D5					; object and clip code
+				OR.B	D4,D6					; object or clip code
+
+				TST.W	D4
+				BNE.S	.PNT_OFF
+					BSR		PERSPECTIVE ;_NEW				; do perspective
+					MOVEM.W	D0/D1,(A2)				; store perspective
+
+.PNT_OFF:		LEA		16(A1),A1
+				LEA		4(A2),A2
+				DBF		D7,.POINT_LOOP
+
+			MOVEM.L	(SP)+,D7/A4 				; get line details off stack
+
+			TST.B	D5							; if and_object_clip_code ne 0 all off one side so exit
+			BNE.S	.OFF_SCREEN
+
+
+			LEA		PERSPECTIVE_POINT,A3
+			MOVE.L	mainscreenp,A0
+			LEA		CUSTOM+2,A6
+ 
+			TST.B	D6							; if or_object_clip_code eq 0 all on screen so no clip needed
+			BNE.S	.CLIP_OBJECT
+ 
+.WHOLE_OBJECT:
+.WHOLE_OBJECT_LOOP:	MOVEM.W	(A4)+,D5/D6
+					ADD.W	D5,D5
+					ADD.W	D5,D5
+					MOVEM.W	(A3,D5.W),D0/D1
+					ADD.W	D6,D6
+					ADD.W	D6,D6
+					MOVEM.W	(A3,D6.W),D2/D3
+					BSR		LINE_DRAW
+					DBF		D7,.WHOLE_OBJECT_LOOP
+.OFF_SCREEN:	RTS
+	
+.CLIP_OBJECT:	
+			LEA		CLIPCODE_POINT,A5		; store point clip code
+;	lea	rotated_point,a5		; store rotated point
+
+.CLIP_OBJECT_LOOP:	MOVEM.W	(A4)+,D5/D6
+					MOVE.B	(A5,D5.W),D0	; start clip code
+					MOVE.B	(A5,D6.W),D1	; end clip code
+					MOVE.B	D0,D2			; backup start clip code
+					AND.B	D1,D2			; both points off same side?
+					BNE.S	.DRAW_LINE_OFF	; yes so next line
+						MOVEM.L D7/A0/A3/A4/A5/A6,-(SP)	; put on stack		
+						MOVE.B	D0,D2					; backup start clip code
+						OR.B	D1,D2					; either point off?
+						BNE.S	.CLIP_LINE				; yes so clip line
+							ADD.W	D5,D5
+							ADD.W	D5,D5
+							MOVEM.W	(A3,D5.W),D0/D1
+							ADD.W	D6,D6
+							ADD.W	D6,D6
+							MOVEM.W	(A3,D6.W),D2/D3
+.DRAW_CLIP_LINE:			BSR		LINE_DRAW
+.DRAW_LINE_NEXT:		MOVEM.L 	(SP)+,D7/A0/A3/A4/A5/A6 	; get off stack
+.DRAW_LINE_OFF:		DBF	D7,.CLIP_OBJECT_LOOP
+					RTS
+
+.CLIP_LINE:	BRA		.DRAW_LINE_NEXT	; TEMP
+
+CLIPCODE	MOVEQ.L	#CC_ON,D4
+;	MOVE.L	D2,TEST_NUMBER_Z
+;			EXT.L	D2
+;			EXT.L	D0
+;			EXT.L	D1
+
+			TST.L	D2
+			BMI.S	.BEHIND
+			MOVE.L	D2,D3
+			NEG.l	D3
+			
+.XTEST		TST.L	D0						; X IS +VE
+			BPL.S	.RIGHT					; YES SO CHECK RIGHT
+
+.LEFT		CMP.L	D3,D0				; COMPARE LEFT AND -Z VAL
+			BGE.S	.YTEST				; ON
+				MOVEQ.L	#CC_LEFT,D4			; OFF
+				BRA.S	.YTEST
+
+.RIGHT		CMP.L	D2,D0				; COMPARE RIGHT AND +Z VAL
+			BLE.S	.YTEST				; ON
+				MOVEQ.L	#CC_RIGHT,D4	; OFF
+			
+.YTEST		TST.L	D1						; Y IS +VE
+			BPL.S	.BOTTOM					; YES SO CHECK BOTTOM
+
+.TOP		CMP.L	D3,D1				; COMPARE TOP AND -Z VAL
+			BGE.S	.EXIT				; ON
+				OR.W	#CC_TOP,D4			; OFF
+				RTS							;	BRA.S	.EXIT
+
+.BOTTOM		CMP.L	D2,D1				; COMPARE BOTTOM AND +Z VAL
+			BLE.S	.EXIT				; ON
+				OR.W	#CC_BOTTOM,D4		; OFF
+.EXIT		RTS
+
+.BEHIND		MOVEQ.L	#CC_BEHIND,D4
+			RTS
+			
+LINE_DRAW	
+;			LEA		CUSTOM+2,A6
+;			MOVE.L	mainscreenp,A0
+
+DRAW_LINE:	CMP.W	D1,D3				;	A0 = PlanePtr, A6 = $DFF002, D0/D1 = X0/Y0, D2/D3 = X1/Y1, D4 = PlaneWidth > Kills: D0-D4/A0-A1 (+D5 in Fill Mode)
+			BGE.S	.y1ly2				; Drawing only from Top to Bottom is necessary for:
+				EXG	D0,D2				; 1) Up-down Differences (same coords)
+				EXG	D1,D3				; 2) Blitter Invert Bit (only at top of line)
+.y1ly2:		SUB.W	D1,D3				; D3 = yd
+
+;			LSL.W	#2,D1
+			ADD.W	D1,D1
+			ADD.W	D1,D1
+			MOVE.L	(A0,D1.W),A2
+
+			MOVEQ.l	#0,D1				; D1 = Quant-Counter
+			SUB.W	D0,D2				; D2 = xd
+			BGE.S	.xdpos
+				ADDQ.W	#2,D1			; Set Bit 1 of Quant-Counter (here it could be a MOVEQ)
+				NEG.W	D2
+.xdpos:		MOVEQ.l	#$f,D4				; D4 full cLEAned (for later oktants MOVE.B)
+			AND.W	D0,D4
+
+			LSR.W	#3,D0				; Yeah, on byte (necessary for bchg)...
+			ADD.W	D0,A2				; ...Blitter ands automagically
+			ROR.W	#4,D4				; D4 = Shift
+			OR.W	#$B00+$CA,D4		; BLTCON0-codes / DL_MInterns = $CA
+			SWAP	D4
+			CMP.W	D2,D3				; Which Delta is the Biggest ?
+			BGE.S	.dygdx
+				ADDQ.W	#1,D1			; Set Bit 0 of Quant-Counter
+				EXG		D2,D3			; Exchange xd with yd
+.dygdx:		ADD.W	D2,D2				; D2 = xd*2
+			MOVE.W	D2,D0				; D0 = Save for $52(A6)
+			SUB.W	D3,D0				; D0 = xd*2-yd
+			ADDX.W	D1,D1				; Bit0 = Sign-Bit
+			MOVE.B	Oktants(PC,d1.w),D4	; In Low Byte of d4 (upper byte cLEAned above)
+			SWAP	D2
+			MOVE.W	D0,D2
+			SUB.W	D3,D2				; D2 = 2*(xd-yd)
+			MOVEQ.l	#6,D1				; D1 = ShiftVal (not necessary) + TestVal for the Blitter
+			LSL.W	D1,D3				; D3 = BLTSIZE
+			ADD.W	#$42,D3
+			LEA	$52-2(A6),A1			; A1 = CUSTOM+$52
+
+.wb:		BTST	D1,(A6)				; WARNING : If you use FastMem and an extreme DMA-Access (e.g. 6 Planes and Copper), you should Insert a tst.b (A6) here (for the shitty AGNUS-BUG)
+			BNE.S	.wb					; Waiting for the Blitter...
+
+			MOVE.L	D4,BLTCON0-2(A6)	; Writing to the Blitter Regs as fast
+			MOVE.L	D2,BLTBMOD-2(A6)	; as possible
+			MOVE.L	A2,BLTCPTH-2(A6)
+			MOVE.W	D0,(A1)+
+			MOVE.L	A2,(A1)+			; Shit-Word Buffer Ptr...
+			MOVE.W	D3,(A1)
+	RTS
+
+DL_Init:	MOVEQ.l	#-1,d1	; Optimized Init Part... A6 = $DFF000 > Kills : D0-D2
+			MOVEQ	#SCN_WIDTH_CHAR,d0
+			MOVEQ.l	#6,d2
+
+.wb:		BTST	d2,(A6)
+			BNE.S	.wb
+
+		MOVE.W	d1,BLTAFWM-2(A6)
+		MOVE.W	d1,BLTBDAT-2(A6)
+		MOVE.W	#$8000,BLTADAT-2(A6)
+		MOVE.W	d0,BLTCMOD-2(A6)
+		MOVE.W	d0,BLTDMOD-2(A6)
+		RTS
+
+Oktants:	DC.B	1,1+$40
+			DC.B	17,17+$40
+			DC.B	9,9+$40
+			DC.B	21,21+$40
+						
+HEX32:		;d0=number
+			;d1=chars across
+			;a0 = screen start
+			MOVE.L	mainscreenp,A0
+			move.l	(a0),a1
+			lea		8(a1,d1),a1
+			lea		hexhcharlist,a2
+			
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			BSR		HEX_CHAR_SETUP
+			RTS
+
+HEX_CHAR_SETUP:		move.w	d0,D1
+					lsr.l	#4,d0
+					and.w	#15,D1
+					move.w	d1,d2
+					add.w	d2,D2
+					add.w	d2,d2
+					add.w	d2,d1
+
+HEX_CHAR:	move.b	(a2,d1.w),d2
+			move.B	d2,SCN_WIDTH_CHAR*0(a1)
+			move.b	1(a2,d1.w),d2
+			move.B	d2,SCN_WIDTH_CHAR*1(a1)
+			move.b	2(a2,d1.w),d2
+			move.B	d2,SCN_WIDTH_CHAR*2(a1)
+			move.b	3(a2,d1.w),d2
+			move.B	d2,SCN_WIDTH_CHAR*3(a1)
+			move.b	4(a2,d1.w),d2
+			move.B	d2,SCN_WIDTH_CHAR*4(a1)
+			subq.l	#1,a1
+			RTS
+
+TEST_NUMBER_Z	DC.L 254
+TEST_NUMBER_X	DC.L 253
+TEST_NUMBER_Y	DC.L 252
+
+TEST_X0	DC.L 250
+TEST_Y0	DC.L 251
+TEST_Z0	DC.L 252
+TEST_X1	DC.L 253
+TEST_Y1	DC.L 254
+TEST_Z1	DC.L 255
+TEST_X2	DC.L 253
+TEST_Y2	DC.L 254
+TEST_Z2	DC.L 255
+			
+PROJ_END	MACRO
+;			SWAP D0
+;			SWAP D1
+;			SWAP D2
+;			LSR.L #7,D2
+			
+			MOVE.L D0,TEST_X2
+			MOVE.L D1,TEST_Y2
+			MOVE.L D2,TEST_Z2
+
+	ext.l D0
+	ext.l D1
+
+			DIVS.W	D2,D1
+			DIVS.W 	D2,D0
+
+	move.l #\1,TEST_NUMBER_Z
+	move.l d0,TEST_NUMBER_X
+	move.l d1,TEST_NUMBER_Y
+
+			ASR.W	#1,d1			;2
+			ADD.W	#SCREEN_VER_MIDDLE,D1
+			ADD.W	#SCREEN_HOR_MIDDLE,d0
+			RTS
+			ENDM
+
+PROJ_31
+;		MOVEQ.L #29,D3
+;			LSL.L 	#d3,D2
+;			LSL.L 	#d3,D1
+;			LSL.L 	#d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $31
+
+PROJ_30
+;		MOVEQ.L #30,D3
+;			LSL.L 	#d3,D2
+;			LSL.L 	#d3,D1
+;			LSL.L 	#d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $30
+
+PROJ_29	MOVEQ.L #01,D3
+			LSL.L 	D2
+			LSL.L 	D1
+			LSL.L 	D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $29
+
+PROJ_28	MOVEQ.L #02,D3
+			LSL.L 	#2,D2
+			LSL.L 	#2,D1
+			LSL.L 	#2,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $28
+
+PROJ_27	MOVEQ.L #03,D3
+			LSL.L 	#3,D2
+			LSL.L 	#3,D1
+			LSL.L 	#3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $27
+
+PROJ_26	MOVEQ.L #04,D3
+			LSL.L 	#4,D2
+			LSL.L 	#4,D1
+			LSL.L 	#4,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $26
+
+PROJ_25	MOVEQ.L #05,D3
+			LSL.L 	#5,D2
+			LSL.L 	#5,D1
+			LSL.L 	#5,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $25
+
+PROJ_24	MOVEQ.L #06,D3
+			LSL.L 	#6,D2
+			LSL.L 	#6,D1
+			LSL.L 	#6,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $24
+
+PROJ_23	MOVEQ.L #07,D3
+			LSL.L 	#7,D2
+			LSL.L 	#7,D1
+			LSL.L 	#7,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $23
+
+PROJ_22	MOVEQ.L #08,D3
+			LSL.L 	#8,D2
+			LSL.L 	#8,D1
+			LSL.L 	#8,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END $22
+
+PROJ_21	MOVEQ.L #09,D3
+			LSL.L 	#8,D2
+			LSL.L 	#8,D1
+			LSL.L 	#8,D0
+			LSR.w #7,D2
+			PROJ_END $21
+
+PROJ_20		aSr.L 	#7,D2
+			aSr.L 	#7,D1
+			LSr.L 	#7,D0
+			LSR.w #7,D2
+			PROJ_END $20
+
+PROJ_19		aSr.L 	#6,D2
+			aSr.L 	#6,D1
+			LSr.L 	#6,D0
+			LSR.w #7,D2
+			PROJ_END $19
+
+PROJ_18		aSr.L 	#5,D2
+			aSr.L 	#5,D1
+			LSr.L 	#5,D0
+			LSR.w #7,D2
+			PROJ_END $18
+
+PROJ_17		aSr.L 	#4,D2
+			aSr.L 	#4,D1
+			LSr.L 	#4,D0
+			LSR.w #7,D2
+			PROJ_END $17
+
+PROJ_16		aSr.L 	#3,D2
+			aSr.L 	#3,D1
+			LSr.L 	#3,D0
+			LSR.w #7,D2
+			PROJ_END $16
+
+PROJ_15		ASr.L 	#2,D2
+			ASr.L 	#2,D1
+			LSr.L 	#2,D0
+			LSR.w #7,D2
+			PROJ_END $15
+
+PROJ_14	;		MOVEQ.L #16-16,D3
+;			LSL.L 	d3,D0
+;			LSL.L 	d3,D1
+;			LSL.L 	d3,D2
+			LSR.L #7,D2
+			PROJ_END $14
+
+PROJ_13	;		MOVEQ.L #17-16,D3
+			LSL.w 	D0
+			LSL.w 	D1
+;			LSL.w 	D2
+			LSR.w #7-1,D2
+			PROJ_END $13
+
+PROJ_12	;		MOVEQ.L #18-16,D3
+			LSL.w 	#2,D0
+			LSL.w 	#2,D1
+;			LSL.w 	#2,D2
+			LSR.w #7-2,D2
+			PROJ_END $12
+
+PROJ_11	;	MOVEQ.L #19-16,D3
+			LSL.w 	#3,D0
+			LSL.w 	#3,D1
+;			LSL.w 	#3,D2
+			LSR.w #7-3,D2
+			PROJ_END $11
+
+PROJ_10	;	MOVEQ.L #20-16,D3
+			LSL.w 	#4,D0
+			LSL.w 	#4,D1
+;			LSL.w 	#4,D2
+			LSR.w #7-4,D2
+			PROJ_END $10
+
+PROJ_09	;	MOVEQ.L #21-16,D3
+			LSL.w 	#5,D0
+			LSL.w 	#5,D1
+;			LSL.w 	#5,D2
+			LSR.w #7-5,D2
+			PROJ_END $09
+
+PROJ_08	;	MOVEQ.L #22-16,D3
+			LSL.w 	#6,D0
+			LSL.w 	#6,D1
+;			LSL.w 	#6,D2
+			LSR.w D2
+			PROJ_END $08
+
+PROJ_07	;	MOVEQ.L #23-16,D3
+			LSL.w 	#7,D0
+			LSL.w 	#7,D1
+;			LSL.w 	#7,D2
+;			LSR.w #7,D2
+			PROJ_END $07
+
+PROJ_06	;	MOVEQ.L #24-16,D3
+			LSL.w 	#8,D0
+			LSL.w 	#8,D1
+;			LSL.w 	#8,D2
+;			LSR.w #7,D2
+			LSL.w 	D2
+			PROJ_END $06
+
+PROJ_05		MOVEQ.L #25-16,D3
+			LSL.w 	d3,D0
+			LSL.w 	d3,D1
+;			LSL.w 	d3,D2
+;			LSR.w #7,D2
+			LSL.w 	#2,D2
+			PROJ_END $05
+
+PROJ_04		MOVEQ.L #26-16,D3
+			LSL.w 	d3,D0
+			LSL.w 	d3,D1
+			LSL.w 	d3,D2
+			LSR.w #7,D2
+			PROJ_END $04
+
+PROJ_03		MOVEQ.L #27-16,D3
+			LSL.w 	d3,D0
+			LSL.w 	d3,D1
+;			LSL.w 	d3,D2
+;			LSR.w #7,D2
+			LSL.w 	#3,D2
+			PROJ_END $03
+
+PROJ_02		MOVEQ.L #28-16,D3
+			LSL.w 	d3,D0
+			LSL.w 	d3,D1
+;			LSL.w 	d3,D2
+;			LSR.w #7,D2
+			LSL.w 	#4,D2
+			PROJ_END $02
+
+PROJ_01		MOVEQ.L #29-16,D3
+			LSL.W 	d3,D0
+			LSL.W 	d3,D1
+;			LSL.W 	d3,D2
+;			LSR.W 	#7,D2
+			LSL.w 	#5,D2
+			PROJ_END $01
+
+PROJ_00		MOVEQ.L #30-16,D3
+			LSL.W 	d3,D0
+			LSL.W 	d3,D1
+;			LSL.W 	d3,D2
+;			LSR.w #7,D2
+			LSL.w 	#6,D2
+			PROJ_END $00
+
+PROJ_31_BK
+;		MOVEQ.L #29,D3
+;			LSL.L 	#d3,D2
+;			LSL.L 	#d3,D1
+;			LSL.L 	#d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 31
+
+PROJ_30_BK
+;		MOVEQ.L #30,D3
+;			LSL.L 	#d3,D2
+;			LSL.L 	#d3,D1
+;			LSL.L 	#d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 30
+
+PROJ_29_BK	MOVEQ.L #01,D3
+			LSL.L 	D2
+			LSL.L 	D1
+			LSL.L 	D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 29
+
+PROJ_28_BK	MOVEQ.L #02,D3
+			LSL.L 	#2,D2
+			LSL.L 	#2,D1
+			LSL.L 	#2,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 28
+
+PROJ_27_BK	MOVEQ.L #03,D3
+			LSL.L 	#3,D2
+			LSL.L 	#3,D1
+			LSL.L 	#3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 27
+
+PROJ_26_BK	MOVEQ.L #04,D3
+			LSL.L 	#4,D2
+			LSL.L 	#4,D1
+			LSL.L 	#4,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 26
+
+PROJ_25_BK	MOVEQ.L #05,D3
+			LSL.L 	#5,D2
+			LSL.L 	#5,D1
+			LSL.L 	#5,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 25
+
+PROJ_24_BK	MOVEQ.L #06,D3
+			LSL.L 	#6,D2
+			LSL.L 	#6,D1
+			LSL.L 	#6,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 24
+
+PROJ_23_BK	MOVEQ.L #07,D3
+			LSL.L 	#7,D2
+			LSL.L 	#7,D1
+			LSL.L 	#7,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 23
+
+PROJ_22_BK	MOVEQ.L #08,D3
+			LSL.L 	#8,D2
+			LSL.L 	#8,D1
+			LSL.L 	#8,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 22
+
+PROJ_21_BK	MOVEQ.L #09,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 21
+
+PROJ_20_BK	MOVEQ.L #10,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 20
+
+PROJ_19_BK	MOVEQ.L #11,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 19
+
+PROJ_18_BK	MOVEQ.L #12,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 18
+
+PROJ_17_BK	MOVEQ.L #13,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 17
+
+PROJ_16_BK	MOVEQ.L #14,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 16
+
+PROJ_15_BK	MOVEQ.L #15,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 15
+
+PROJ_14_BK	MOVEQ.L #16,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 14
+
+PROJ_13_BK	MOVEQ.L #17,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 13
+
+PROJ_12_BK	MOVEQ.L #18,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 12
+
+PROJ_11_BK	MOVEQ.L #19,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 11
+
+PROJ_10_BK	MOVEQ.L #20,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 10
+
+PROJ_09_BK	MOVEQ.L #21,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 09
+
+PROJ_08_BK	MOVEQ.L #22,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 08
+
+PROJ_07_BK	MOVEQ.L #23,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 07
+
+PROJ_06_BK	MOVEQ.L #24,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 06
+
+PROJ_05_BK	MOVEQ.L #25,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 05
+
+PROJ_04_BK	MOVEQ.L #26,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 04
+
+PROJ_03_BK	MOVEQ.L #27,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 03
+
+PROJ_02_BK	MOVEQ.L #28,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 02
+
+PROJ_01_BK	MOVEQ.L #29,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 01
+
+PROJ_00_BK	MOVEQ.L #30,D3
+			LSL.L 	d3,D2
+			LSL.L 	d3,D1
+			LSL.L 	d3,D0
+			SWAP D0
+			SWAP D1
+			SWAP D2
+			LSR.L #7,D2
+			PROJ_END 00
+
+PERS_TAB_3224
+			DCB.L 1,PROJ_24		;24*1
+			DCB.L 1,PROJ_24		;24*1
+			DCB.L 2,PROJ_25		;25*1
+			DCB.L 4,PROJ_26		;26*1
+			DCB.L 8,PROJ_27		;27*1
+			DCB.L 16,PROJ_28	;28*1
+			DCB.L 32,PROJ_29	;29*1
+			DCB.L 64,PROJ_30	;30*1
+			DCB.L 128,PROJ_31	;31*1
+
+PERS_TAB_2416
+			DCB.L 1,PROJ_16		;16*1
+			DCB.L 1,PROJ_16		;16*1
+			DCB.L 2,PROJ_17		;17*1
+			DCB.L 4,PROJ_18		;18*1
+			DCB.L 8,PROJ_19		;19*1
+			DCB.L 16,PROJ_20	;20*1
+			DCB.L 32,PROJ_21	;21*1
+			DCB.L 64,PROJ_22	;22*1
+			DCB.L 128,PROJ_23	;23*1
+
+PERS_TAB_1608
+			DCB.L 1,PROJ_08		;8*1
+			DCB.L 1,PROJ_08		;8*1
+			DCB.L 2,PROJ_09		;9*1
+			DCB.L 4,PROJ_10		;10*1
+			DCB.L 8,PROJ_11		;11*1
+			DCB.L 16,PROJ_12	;12*1
+			DCB.L 32,PROJ_13	;13*1
+			DCB.L 64,PROJ_14	;14*1
+			DCB.L 128,PROJ_15	;15*1
+
+PERS_TAB_0800
+			DCB.L 1,PROJ_00		;0*1
+			DCB.L 1,PROJ_00		;0*1
+			DCB.L 2,PROJ_01		;1*1
+			DCB.L 4,PROJ_02		;2*1
+			DCB.L 8,PROJ_03		;3*1
+			DCB.L 16,PROJ_04	;4*1
+			DCB.L 32,PROJ_05	;5*1
+			DCB.L 64,PROJ_06	;6*1
+			DCB.L 128,PROJ_07	;7*1
+
+PERSPECTIVE	CMP.L #$00FFFFFF,D2
+			BLS.S .CONT2416
+.CONT3224		MOVE.L D2,D3
+				SWAP D3
+				LSR.W #8,D3
+				ADD.W D3,D3
+				ADD.W D3,D3
+				LEA PERS_TAB_3224,A4
+				MOVE.L (A4,D3.W),A4
+				JMP (A4)
+
+.CONT2416	CMP.L #$0000FFFF,D2
+			BLS.S .CONT1608
+				MOVE.L D2,D3
+				SWAP D3
+				AND.W #255,D3
+				ADD.W D3,D3
+				ADD.W D3,D3
+				LEA PERS_TAB_2416,A4
+				MOVE.L (A4,D3.W),A4
+				JMP (A4)
+
+.CONT1608	CMP.W #$00FF,D2
+			BLS.S .CONT0800
+				MOVE.W D2,D3
+				LSR.W #8,D3
+				ADD.W D3,D3
+				ADD.W D3,D3
+				LEA PERS_TAB_1608,A4
+				MOVE.L (A4,D3.W),A4
+				JMP (A4)
+
+.CONT0800	MOVE.W D2,D3
+			AND.W #255,D3
+				ADD.W D3,D3
+				ADD.W D3,D3
+				LEA PERS_TAB_0800,A4
+				MOVE.L (A4,D3.W),A4
+				JMP (A4)
+
+hexhcharlist:	dc.B	%01111111,%01100011,%01100011,%01100011,%01111111
+				dc.B	%00001100,%00111100,%00001100,%00001100,%01111111
+				dc.B	%01111111,%00000011,%01111111,%11000000,%01111111
+				dc.B	%01111111,%00000011,%01111111,%00000011,%01111111
+				dc.B	%01100011,%01100011,%01111111,%00000011,%00000011
+				dc.B	%01111111,%01100000,%01111111,%00000011,%01111111
+				dc.B	%01111111,%01100000,%01111111,%01100011,%01111111
+				dc.B	%01111111,%00000011,%00000011,%00000011,%00000011
+				dc.B	%01111111,%01100011,%01111111,%01100011,%01111111
+				dc.B	%01111111,%01100011,%01111111,%00000011,%01111111
+				dc.B	%01111111,%01100011,%01111111,%01100011,%01100011
+				dc.B	%01111110,%01100011,%01111110,%01100011,%01111110
+				dc.B	%01111111,%01100000,%01100000,%01100000,%01111111
+				dc.B	%01111110,%01100011,%01100011,%01100011,%01111110
+				dc.B	%01111111,%01100000,%01111111,%01100000,%01111111
+				dc.B	%01111111,%01100000,%01111111,%01100000,%01100000
+
+HEX_LINE0:	DC.B	%01111111,%00001100,%01111111,%01111111,%01100011,%01111111,%01111111,%01111111,%01111111,%01111111,%01111111,%01111110,%01111111,%01111110,%01111111,%01111111
+HEX_LINE1:	DC.B	%01100011,%00111100,%00000011,%00000011,%01100011,%01100000,%01100000,%00000011,%01100011,%01100011,%01100011,%01100011,%01100000,%01100011,%01100000,%01100000
+HEX_LINE2:	DC.B	%01100011,%00001100,%01111111,%01111111,%01111111,%01111111,%01111111,%00000011,%01111111,%01111111,%01111111,%01111110,%01100000,%01100011,%01111111,%01111111
+HEX_LINE3:	DC.B	%01100011,%00001100,%01100000,%00000011,%00000011,%00000011,%01100011,%00000011,%01100011,%00000011,%01100011,%01100011,%01100000,%01100011,%01100000,%01100000
+HEX_LINE4:	DC.B	%01111111,%01111111,%01111111,%01111111,%00000011,%01111111,%01111111,%00000011,%01111111,%01111111,%01100011,%01111110,%01111111,%01111110,%01111111,%01100000
+
+mainscreenp:	DC.L	scrptr1,scrptr2,scrptr3
+
+scrptr1	DC.L	scr1+(SCN_WIDTH_CHAR*000),scr1+(SCN_WIDTH_CHAR*001),scr1+(SCN_WIDTH_CHAR*002),scr1+(SCN_WIDTH_CHAR*003),scr1+(SCN_WIDTH_CHAR*004),scr1+(SCN_WIDTH_CHAR*005),scr1+(SCN_WIDTH_CHAR*006),scr1+(SCN_WIDTH_CHAR*007),scr1+(SCN_WIDTH_CHAR*008),scr1+(SCN_WIDTH_CHAR*009)
+	DC.L	scr1+(SCN_WIDTH_CHAR*010),scr1+(SCN_WIDTH_CHAR*011),scr1+(SCN_WIDTH_CHAR*012),scr1+(SCN_WIDTH_CHAR*013),scr1+(SCN_WIDTH_CHAR*014),scr1+(SCN_WIDTH_CHAR*015),scr1+(SCN_WIDTH_CHAR*016),scr1+(SCN_WIDTH_CHAR*017),scr1+(SCN_WIDTH_CHAR*018),scr1+(SCN_WIDTH_CHAR*019)
+	DC.L	scr1+(SCN_WIDTH_CHAR*020),scr1+(SCN_WIDTH_CHAR*021),scr1+(SCN_WIDTH_CHAR*022),scr1+(SCN_WIDTH_CHAR*023),scr1+(SCN_WIDTH_CHAR*024),scr1+(SCN_WIDTH_CHAR*025),scr1+(SCN_WIDTH_CHAR*026),scr1+(SCN_WIDTH_CHAR*027),scr1+(SCN_WIDTH_CHAR*028),scr1+(SCN_WIDTH_CHAR*029)
+	DC.L	scr1+(SCN_WIDTH_CHAR*030),scr1+(SCN_WIDTH_CHAR*031),scr1+(SCN_WIDTH_CHAR*032),scr1+(SCN_WIDTH_CHAR*033),scr1+(SCN_WIDTH_CHAR*034),scr1+(SCN_WIDTH_CHAR*035),scr1+(SCN_WIDTH_CHAR*036),scr1+(SCN_WIDTH_CHAR*037),scr1+(SCN_WIDTH_CHAR*038),scr1+(SCN_WIDTH_CHAR*039)
+	DC.L	scr1+(SCN_WIDTH_CHAR*040),scr1+(SCN_WIDTH_CHAR*041),scr1+(SCN_WIDTH_CHAR*042),scr1+(SCN_WIDTH_CHAR*043),scr1+(SCN_WIDTH_CHAR*044),scr1+(SCN_WIDTH_CHAR*045),scr1+(SCN_WIDTH_CHAR*046),scr1+(SCN_WIDTH_CHAR*047),scr1+(SCN_WIDTH_CHAR*048),scr1+(SCN_WIDTH_CHAR*049)
+	DC.L	scr1+(SCN_WIDTH_CHAR*050),scr1+(SCN_WIDTH_CHAR*051),scr1+(SCN_WIDTH_CHAR*052),scr1+(SCN_WIDTH_CHAR*053),scr1+(SCN_WIDTH_CHAR*054),scr1+(SCN_WIDTH_CHAR*055),scr1+(SCN_WIDTH_CHAR*056),scr1+(SCN_WIDTH_CHAR*057),scr1+(SCN_WIDTH_CHAR*058),scr1+(SCN_WIDTH_CHAR*059)
+	DC.L	scr1+(SCN_WIDTH_CHAR*060),scr1+(SCN_WIDTH_CHAR*061),scr1+(SCN_WIDTH_CHAR*062),scr1+(SCN_WIDTH_CHAR*063),scr1+(SCN_WIDTH_CHAR*064),scr1+(SCN_WIDTH_CHAR*065),scr1+(SCN_WIDTH_CHAR*066),scr1+(SCN_WIDTH_CHAR*067),scr1+(SCN_WIDTH_CHAR*068),scr1+(SCN_WIDTH_CHAR*069)
+	DC.L	scr1+(SCN_WIDTH_CHAR*070),scr1+(SCN_WIDTH_CHAR*071),scr1+(SCN_WIDTH_CHAR*072),scr1+(SCN_WIDTH_CHAR*073),scr1+(SCN_WIDTH_CHAR*074),scr1+(SCN_WIDTH_CHAR*075),scr1+(SCN_WIDTH_CHAR*076),scr1+(SCN_WIDTH_CHAR*077),scr1+(SCN_WIDTH_CHAR*078),scr1+(SCN_WIDTH_CHAR*079)
+	DC.L	scr1+(SCN_WIDTH_CHAR*080),scr1+(SCN_WIDTH_CHAR*081),scr1+(SCN_WIDTH_CHAR*082),scr1+(SCN_WIDTH_CHAR*083),scr1+(SCN_WIDTH_CHAR*084),scr1+(SCN_WIDTH_CHAR*085),scr1+(SCN_WIDTH_CHAR*086),scr1+(SCN_WIDTH_CHAR*087),scr1+(SCN_WIDTH_CHAR*088),scr1+(SCN_WIDTH_CHAR*089)
+	DC.L	scr1+(SCN_WIDTH_CHAR*090),scr1+(SCN_WIDTH_CHAR*091),scr1+(SCN_WIDTH_CHAR*092),scr1+(SCN_WIDTH_CHAR*093),scr1+(SCN_WIDTH_CHAR*094),scr1+(SCN_WIDTH_CHAR*095),scr1+(SCN_WIDTH_CHAR*096),scr1+(SCN_WIDTH_CHAR*097),scr1+(SCN_WIDTH_CHAR*098),scr1+(SCN_WIDTH_CHAR*099)
+	DC.L	scr1+(SCN_WIDTH_CHAR*100),scr1+(SCN_WIDTH_CHAR*101),scr1+(SCN_WIDTH_CHAR*102),scr1+(SCN_WIDTH_CHAR*103),scr1+(SCN_WIDTH_CHAR*104),scr1+(SCN_WIDTH_CHAR*105),scr1+(SCN_WIDTH_CHAR*106),scr1+(SCN_WIDTH_CHAR*107),scr1+(SCN_WIDTH_CHAR*108),scr1+(SCN_WIDTH_CHAR*109)
+	DC.L	scr1+(SCN_WIDTH_CHAR*110),scr1+(SCN_WIDTH_CHAR*111),scr1+(SCN_WIDTH_CHAR*112),scr1+(SCN_WIDTH_CHAR*113),scr1+(SCN_WIDTH_CHAR*114),scr1+(SCN_WIDTH_CHAR*115),scr1+(SCN_WIDTH_CHAR*116),scr1+(SCN_WIDTH_CHAR*117),scr1+(SCN_WIDTH_CHAR*118),scr1+(SCN_WIDTH_CHAR*119)
+	DC.L	scr1+(SCN_WIDTH_CHAR*120),scr1+(SCN_WIDTH_CHAR*121),scr1+(SCN_WIDTH_CHAR*122),scr1+(SCN_WIDTH_CHAR*123),scr1+(SCN_WIDTH_CHAR*124),scr1+(SCN_WIDTH_CHAR*125),scr1+(SCN_WIDTH_CHAR*126),scr1+(SCN_WIDTH_CHAR*127),scr1+(SCN_WIDTH_CHAR*128),scr1+(SCN_WIDTH_CHAR*129)
+	DC.L	scr1+(SCN_WIDTH_CHAR*130),scr1+(SCN_WIDTH_CHAR*131),scr1+(SCN_WIDTH_CHAR*132),scr1+(SCN_WIDTH_CHAR*133),scr1+(SCN_WIDTH_CHAR*134),scr1+(SCN_WIDTH_CHAR*135),scr1+(SCN_WIDTH_CHAR*136),scr1+(SCN_WIDTH_CHAR*137),scr1+(SCN_WIDTH_CHAR*138),scr1+(SCN_WIDTH_CHAR*139)
+	DC.L	scr1+(SCN_WIDTH_CHAR*140),scr1+(SCN_WIDTH_CHAR*141),scr1+(SCN_WIDTH_CHAR*142),scr1+(SCN_WIDTH_CHAR*143),scr1+(SCN_WIDTH_CHAR*144),scr1+(SCN_WIDTH_CHAR*145),scr1+(SCN_WIDTH_CHAR*146),scr1+(SCN_WIDTH_CHAR*147),scr1+(SCN_WIDTH_CHAR*148),scr1+(SCN_WIDTH_CHAR*149)
+	DC.L	scr1+(SCN_WIDTH_CHAR*150),scr1+(SCN_WIDTH_CHAR*151),scr1+(SCN_WIDTH_CHAR*152),scr1+(SCN_WIDTH_CHAR*153),scr1+(SCN_WIDTH_CHAR*154),scr1+(SCN_WIDTH_CHAR*155),scr1+(SCN_WIDTH_CHAR*156),scr1+(SCN_WIDTH_CHAR*157),scr1+(SCN_WIDTH_CHAR*158),scr1+(SCN_WIDTH_CHAR*159)
+	DC.L	scr1+(SCN_WIDTH_CHAR*160),scr1+(SCN_WIDTH_CHAR*161),scr1+(SCN_WIDTH_CHAR*162),scr1+(SCN_WIDTH_CHAR*163),scr1+(SCN_WIDTH_CHAR*164),scr1+(SCN_WIDTH_CHAR*165),scr1+(SCN_WIDTH_CHAR*166),scr1+(SCN_WIDTH_CHAR*167),scr1+(SCN_WIDTH_CHAR*168),scr1+(SCN_WIDTH_CHAR*169)
+	DC.L	scr1+(SCN_WIDTH_CHAR*170),scr1+(SCN_WIDTH_CHAR*171),scr1+(SCN_WIDTH_CHAR*172),scr1+(SCN_WIDTH_CHAR*173),scr1+(SCN_WIDTH_CHAR*174),scr1+(SCN_WIDTH_CHAR*175),scr1+(SCN_WIDTH_CHAR*176),scr1+(SCN_WIDTH_CHAR*177),scr1+(SCN_WIDTH_CHAR*178),scr1+(SCN_WIDTH_CHAR*179)
+	DC.L	scr1+(SCN_WIDTH_CHAR*180),scr1+(SCN_WIDTH_CHAR*181),scr1+(SCN_WIDTH_CHAR*182),scr1+(SCN_WIDTH_CHAR*183),scr1+(SCN_WIDTH_CHAR*184),scr1+(SCN_WIDTH_CHAR*185),scr1+(SCN_WIDTH_CHAR*186),scr1+(SCN_WIDTH_CHAR*187),scr1+(SCN_WIDTH_CHAR*188),scr1+(SCN_WIDTH_CHAR*189)
+	DC.L	scr1+(SCN_WIDTH_CHAR*190),scr1+(SCN_WIDTH_CHAR*191),scr1+(SCN_WIDTH_CHAR*192),scr1+(SCN_WIDTH_CHAR*193),scr1+(SCN_WIDTH_CHAR*194),scr1+(SCN_WIDTH_CHAR*195),scr1+(SCN_WIDTH_CHAR*196),scr1+(SCN_WIDTH_CHAR*197),scr1+(SCN_WIDTH_CHAR*198),scr1+(SCN_WIDTH_CHAR*199)
+
+scrptr2	DC.L	scr2+(SCN_WIDTH_CHAR*000),scr2+(SCN_WIDTH_CHAR*001),scr2+(SCN_WIDTH_CHAR*002),scr2+(SCN_WIDTH_CHAR*003),scr2+(SCN_WIDTH_CHAR*004),scr2+(SCN_WIDTH_CHAR*005),scr2+(SCN_WIDTH_CHAR*006),scr2+(SCN_WIDTH_CHAR*007),scr2+(SCN_WIDTH_CHAR*008),scr2+(SCN_WIDTH_CHAR*009)
+	DC.L	scr2+(SCN_WIDTH_CHAR*010),scr2+(SCN_WIDTH_CHAR*011),scr2+(SCN_WIDTH_CHAR*012),scr2+(SCN_WIDTH_CHAR*013),scr2+(SCN_WIDTH_CHAR*014),scr2+(SCN_WIDTH_CHAR*015),scr2+(SCN_WIDTH_CHAR*016),scr2+(SCN_WIDTH_CHAR*017),scr2+(SCN_WIDTH_CHAR*018),scr2+(SCN_WIDTH_CHAR*019)
+	DC.L	scr2+(SCN_WIDTH_CHAR*020),scr2+(SCN_WIDTH_CHAR*021),scr2+(SCN_WIDTH_CHAR*022),scr2+(SCN_WIDTH_CHAR*023),scr2+(SCN_WIDTH_CHAR*024),scr2+(SCN_WIDTH_CHAR*025),scr2+(SCN_WIDTH_CHAR*026),scr2+(SCN_WIDTH_CHAR*027),scr2+(SCN_WIDTH_CHAR*028),scr2+(SCN_WIDTH_CHAR*029)
+	DC.L	scr2+(SCN_WIDTH_CHAR*030),scr2+(SCN_WIDTH_CHAR*031),scr2+(SCN_WIDTH_CHAR*032),scr2+(SCN_WIDTH_CHAR*033),scr2+(SCN_WIDTH_CHAR*034),scr2+(SCN_WIDTH_CHAR*035),scr2+(SCN_WIDTH_CHAR*036),scr2+(SCN_WIDTH_CHAR*037),scr2+(SCN_WIDTH_CHAR*038),scr2+(SCN_WIDTH_CHAR*039)
+	DC.L	scr2+(SCN_WIDTH_CHAR*040),scr2+(SCN_WIDTH_CHAR*041),scr2+(SCN_WIDTH_CHAR*042),scr2+(SCN_WIDTH_CHAR*043),scr2+(SCN_WIDTH_CHAR*044),scr2+(SCN_WIDTH_CHAR*045),scr2+(SCN_WIDTH_CHAR*046),scr2+(SCN_WIDTH_CHAR*047),scr2+(SCN_WIDTH_CHAR*048),scr2+(SCN_WIDTH_CHAR*049)
+	DC.L	scr2+(SCN_WIDTH_CHAR*050),scr2+(SCN_WIDTH_CHAR*051),scr2+(SCN_WIDTH_CHAR*052),scr2+(SCN_WIDTH_CHAR*053),scr2+(SCN_WIDTH_CHAR*054),scr2+(SCN_WIDTH_CHAR*055),scr2+(SCN_WIDTH_CHAR*056),scr2+(SCN_WIDTH_CHAR*057),scr2+(SCN_WIDTH_CHAR*058),scr2+(SCN_WIDTH_CHAR*059)
+	DC.L	scr2+(SCN_WIDTH_CHAR*060),scr2+(SCN_WIDTH_CHAR*061),scr2+(SCN_WIDTH_CHAR*062),scr2+(SCN_WIDTH_CHAR*063),scr2+(SCN_WIDTH_CHAR*064),scr2+(SCN_WIDTH_CHAR*065),scr2+(SCN_WIDTH_CHAR*066),scr2+(SCN_WIDTH_CHAR*067),scr2+(SCN_WIDTH_CHAR*068),scr2+(SCN_WIDTH_CHAR*069)
+	DC.L	scr2+(SCN_WIDTH_CHAR*070),scr2+(SCN_WIDTH_CHAR*071),scr2+(SCN_WIDTH_CHAR*072),scr2+(SCN_WIDTH_CHAR*073),scr2+(SCN_WIDTH_CHAR*074),scr2+(SCN_WIDTH_CHAR*075),scr2+(SCN_WIDTH_CHAR*076),scr2+(SCN_WIDTH_CHAR*077),scr2+(SCN_WIDTH_CHAR*078),scr2+(SCN_WIDTH_CHAR*079)
+	DC.L	scr2+(SCN_WIDTH_CHAR*080),scr2+(SCN_WIDTH_CHAR*081),scr2+(SCN_WIDTH_CHAR*082),scr2+(SCN_WIDTH_CHAR*083),scr2+(SCN_WIDTH_CHAR*084),scr2+(SCN_WIDTH_CHAR*085),scr2+(SCN_WIDTH_CHAR*086),scr2+(SCN_WIDTH_CHAR*087),scr2+(SCN_WIDTH_CHAR*088),scr2+(SCN_WIDTH_CHAR*089)
+	DC.L	scr2+(SCN_WIDTH_CHAR*090),scr2+(SCN_WIDTH_CHAR*091),scr2+(SCN_WIDTH_CHAR*092),scr2+(SCN_WIDTH_CHAR*093),scr2+(SCN_WIDTH_CHAR*094),scr2+(SCN_WIDTH_CHAR*095),scr2+(SCN_WIDTH_CHAR*096),scr2+(SCN_WIDTH_CHAR*097),scr2+(SCN_WIDTH_CHAR*098),scr2+(SCN_WIDTH_CHAR*099)
+	DC.L	scr2+(SCN_WIDTH_CHAR*100),scr2+(SCN_WIDTH_CHAR*101),scr2+(SCN_WIDTH_CHAR*102),scr2+(SCN_WIDTH_CHAR*103),scr2+(SCN_WIDTH_CHAR*104),scr2+(SCN_WIDTH_CHAR*105),scr2+(SCN_WIDTH_CHAR*106),scr2+(SCN_WIDTH_CHAR*107),scr2+(SCN_WIDTH_CHAR*108),scr2+(SCN_WIDTH_CHAR*109)
+	DC.L	scr2+(SCN_WIDTH_CHAR*110),scr2+(SCN_WIDTH_CHAR*111),scr2+(SCN_WIDTH_CHAR*112),scr2+(SCN_WIDTH_CHAR*113),scr2+(SCN_WIDTH_CHAR*114),scr2+(SCN_WIDTH_CHAR*115),scr2+(SCN_WIDTH_CHAR*116),scr2+(SCN_WIDTH_CHAR*117),scr2+(SCN_WIDTH_CHAR*118),scr2+(SCN_WIDTH_CHAR*119)
+	DC.L	scr2+(SCN_WIDTH_CHAR*120),scr2+(SCN_WIDTH_CHAR*121),scr2+(SCN_WIDTH_CHAR*122),scr2+(SCN_WIDTH_CHAR*123),scr2+(SCN_WIDTH_CHAR*124),scr2+(SCN_WIDTH_CHAR*125),scr2+(SCN_WIDTH_CHAR*126),scr2+(SCN_WIDTH_CHAR*127),scr2+(SCN_WIDTH_CHAR*128),scr2+(SCN_WIDTH_CHAR*129)
+	DC.L	scr2+(SCN_WIDTH_CHAR*130),scr2+(SCN_WIDTH_CHAR*131),scr2+(SCN_WIDTH_CHAR*132),scr2+(SCN_WIDTH_CHAR*133),scr2+(SCN_WIDTH_CHAR*134),scr2+(SCN_WIDTH_CHAR*135),scr2+(SCN_WIDTH_CHAR*136),scr2+(SCN_WIDTH_CHAR*137),scr2+(SCN_WIDTH_CHAR*138),scr2+(SCN_WIDTH_CHAR*139)
+	DC.L	scr2+(SCN_WIDTH_CHAR*140),scr2+(SCN_WIDTH_CHAR*141),scr2+(SCN_WIDTH_CHAR*142),scr2+(SCN_WIDTH_CHAR*143),scr2+(SCN_WIDTH_CHAR*144),scr2+(SCN_WIDTH_CHAR*145),scr2+(SCN_WIDTH_CHAR*146),scr2+(SCN_WIDTH_CHAR*147),scr2+(SCN_WIDTH_CHAR*148),scr2+(SCN_WIDTH_CHAR*149)
+	DC.L	scr2+(SCN_WIDTH_CHAR*150),scr2+(SCN_WIDTH_CHAR*151),scr2+(SCN_WIDTH_CHAR*152),scr2+(SCN_WIDTH_CHAR*153),scr2+(SCN_WIDTH_CHAR*154),scr2+(SCN_WIDTH_CHAR*155),scr2+(SCN_WIDTH_CHAR*156),scr2+(SCN_WIDTH_CHAR*157),scr2+(SCN_WIDTH_CHAR*158),scr2+(SCN_WIDTH_CHAR*159)
+	DC.L	scr2+(SCN_WIDTH_CHAR*160),scr2+(SCN_WIDTH_CHAR*161),scr2+(SCN_WIDTH_CHAR*162),scr2+(SCN_WIDTH_CHAR*163),scr2+(SCN_WIDTH_CHAR*164),scr2+(SCN_WIDTH_CHAR*165),scr2+(SCN_WIDTH_CHAR*166),scr2+(SCN_WIDTH_CHAR*167),scr2+(SCN_WIDTH_CHAR*168),scr2+(SCN_WIDTH_CHAR*169)
+	DC.L	scr2+(SCN_WIDTH_CHAR*170),scr2+(SCN_WIDTH_CHAR*171),scr2+(SCN_WIDTH_CHAR*172),scr2+(SCN_WIDTH_CHAR*173),scr2+(SCN_WIDTH_CHAR*174),scr2+(SCN_WIDTH_CHAR*175),scr2+(SCN_WIDTH_CHAR*176),scr2+(SCN_WIDTH_CHAR*177),scr2+(SCN_WIDTH_CHAR*178),scr2+(SCN_WIDTH_CHAR*179)
+	DC.L	scr2+(SCN_WIDTH_CHAR*180),scr2+(SCN_WIDTH_CHAR*181),scr2+(SCN_WIDTH_CHAR*182),scr2+(SCN_WIDTH_CHAR*183),scr2+(SCN_WIDTH_CHAR*184),scr2+(SCN_WIDTH_CHAR*185),scr2+(SCN_WIDTH_CHAR*186),scr2+(SCN_WIDTH_CHAR*187),scr2+(SCN_WIDTH_CHAR*188),scr2+(SCN_WIDTH_CHAR*189)
+	DC.L	scr2+(SCN_WIDTH_CHAR*190),scr2+(SCN_WIDTH_CHAR*191),scr2+(SCN_WIDTH_CHAR*192),scr2+(SCN_WIDTH_CHAR*193),scr2+(SCN_WIDTH_CHAR*194),scr2+(SCN_WIDTH_CHAR*195),scr2+(SCN_WIDTH_CHAR*196),scr2+(SCN_WIDTH_CHAR*197),scr2+(SCN_WIDTH_CHAR*198),scr2+(SCN_WIDTH_CHAR*199)
+
+scrptr3	DC.L	scr3+(SCN_WIDTH_CHAR*000),scr3+(SCN_WIDTH_CHAR*001),scr3+(SCN_WIDTH_CHAR*002),scr3+(SCN_WIDTH_CHAR*003),scr3+(SCN_WIDTH_CHAR*004),scr3+(SCN_WIDTH_CHAR*005),scr3+(SCN_WIDTH_CHAR*006),scr3+(SCN_WIDTH_CHAR*007),scr3+(SCN_WIDTH_CHAR*008),scr3+(SCN_WIDTH_CHAR*009)
+	DC.L 	scr3+(SCN_WIDTH_CHAR*010),scr3+(SCN_WIDTH_CHAR*011),scr3+(SCN_WIDTH_CHAR*012),scr3+(SCN_WIDTH_CHAR*013),scr3+(SCN_WIDTH_CHAR*014),scr3+(SCN_WIDTH_CHAR*015),scr3+(SCN_WIDTH_CHAR*016),scr3+(SCN_WIDTH_CHAR*017),scr3+(SCN_WIDTH_CHAR*018),scr3+(SCN_WIDTH_CHAR*019)
+	DC.L	scr3+(SCN_WIDTH_CHAR*020),scr3+(SCN_WIDTH_CHAR*021),scr3+(SCN_WIDTH_CHAR*022),scr3+(SCN_WIDTH_CHAR*023),scr3+(SCN_WIDTH_CHAR*024),scr3+(SCN_WIDTH_CHAR*025),scr3+(SCN_WIDTH_CHAR*026),scr3+(SCN_WIDTH_CHAR*027),scr3+(SCN_WIDTH_CHAR*028),scr3+(SCN_WIDTH_CHAR*029)
+	DC.L	scr3+(SCN_WIDTH_CHAR*030),scr3+(SCN_WIDTH_CHAR*031),scr3+(SCN_WIDTH_CHAR*032),scr3+(SCN_WIDTH_CHAR*033),scr3+(SCN_WIDTH_CHAR*034),scr3+(SCN_WIDTH_CHAR*035),scr3+(SCN_WIDTH_CHAR*036),scr3+(SCN_WIDTH_CHAR*037),scr3+(SCN_WIDTH_CHAR*038),scr3+(SCN_WIDTH_CHAR*039)
+	DC.L	scr3+(SCN_WIDTH_CHAR*040),scr3+(SCN_WIDTH_CHAR*041),scr3+(SCN_WIDTH_CHAR*042),scr3+(SCN_WIDTH_CHAR*043),scr3+(SCN_WIDTH_CHAR*044),scr3+(SCN_WIDTH_CHAR*045),scr3+(SCN_WIDTH_CHAR*046),scr3+(SCN_WIDTH_CHAR*047),scr3+(SCN_WIDTH_CHAR*048),scr3+(SCN_WIDTH_CHAR*049)
+	DC.L	scr3+(SCN_WIDTH_CHAR*050),scr3+(SCN_WIDTH_CHAR*051),scr3+(SCN_WIDTH_CHAR*052),scr3+(SCN_WIDTH_CHAR*053),scr3+(SCN_WIDTH_CHAR*054),scr3+(SCN_WIDTH_CHAR*055),scr3+(SCN_WIDTH_CHAR*056),scr3+(SCN_WIDTH_CHAR*057),scr3+(SCN_WIDTH_CHAR*058),scr3+(SCN_WIDTH_CHAR*059)
+	DC.L	scr3+(SCN_WIDTH_CHAR*060),scr3+(SCN_WIDTH_CHAR*061),scr3+(SCN_WIDTH_CHAR*062),scr3+(SCN_WIDTH_CHAR*063),scr3+(SCN_WIDTH_CHAR*064),scr3+(SCN_WIDTH_CHAR*065),scr3+(SCN_WIDTH_CHAR*066),scr3+(SCN_WIDTH_CHAR*067),scr3+(SCN_WIDTH_CHAR*068),scr3+(SCN_WIDTH_CHAR*069)
+	DC.L	scr3+(SCN_WIDTH_CHAR*070),scr3+(SCN_WIDTH_CHAR*071),scr3+(SCN_WIDTH_CHAR*072),scr3+(SCN_WIDTH_CHAR*073),scr3+(SCN_WIDTH_CHAR*074),scr3+(SCN_WIDTH_CHAR*075),scr3+(SCN_WIDTH_CHAR*076),scr3+(SCN_WIDTH_CHAR*077),scr3+(SCN_WIDTH_CHAR*078),scr3+(SCN_WIDTH_CHAR*079)
+	DC.L	scr3+(SCN_WIDTH_CHAR*080),scr3+(SCN_WIDTH_CHAR*081),scr3+(SCN_WIDTH_CHAR*082),scr3+(SCN_WIDTH_CHAR*083),scr3+(SCN_WIDTH_CHAR*084),scr3+(SCN_WIDTH_CHAR*085),scr3+(SCN_WIDTH_CHAR*086),scr3+(SCN_WIDTH_CHAR*087),scr3+(SCN_WIDTH_CHAR*088),scr3+(SCN_WIDTH_CHAR*089)
+	DC.L	scr3+(SCN_WIDTH_CHAR*090),scr3+(SCN_WIDTH_CHAR*091),scr3+(SCN_WIDTH_CHAR*092),scr3+(SCN_WIDTH_CHAR*093),scr3+(SCN_WIDTH_CHAR*094),scr3+(SCN_WIDTH_CHAR*095),scr3+(SCN_WIDTH_CHAR*096),scr3+(SCN_WIDTH_CHAR*097),scr3+(SCN_WIDTH_CHAR*098),scr3+(SCN_WIDTH_CHAR*099)
+	DC.L	scr3+(SCN_WIDTH_CHAR*100),scr3+(SCN_WIDTH_CHAR*101),scr3+(SCN_WIDTH_CHAR*102),scr3+(SCN_WIDTH_CHAR*103),scr3+(SCN_WIDTH_CHAR*104),scr3+(SCN_WIDTH_CHAR*105),scr3+(SCN_WIDTH_CHAR*106),scr3+(SCN_WIDTH_CHAR*107),scr3+(SCN_WIDTH_CHAR*108),scr3+(SCN_WIDTH_CHAR*109)
+	DC.L	scr3+(SCN_WIDTH_CHAR*110),scr3+(SCN_WIDTH_CHAR*111),scr3+(SCN_WIDTH_CHAR*112),scr3+(SCN_WIDTH_CHAR*113),scr3+(SCN_WIDTH_CHAR*114),scr3+(SCN_WIDTH_CHAR*115),scr3+(SCN_WIDTH_CHAR*116),scr3+(SCN_WIDTH_CHAR*117),scr3+(SCN_WIDTH_CHAR*118),scr3+(SCN_WIDTH_CHAR*119)
+	DC.L	scr3+(SCN_WIDTH_CHAR*120),scr3+(SCN_WIDTH_CHAR*121),scr3+(SCN_WIDTH_CHAR*122),scr3+(SCN_WIDTH_CHAR*123),scr3+(SCN_WIDTH_CHAR*124),scr3+(SCN_WIDTH_CHAR*125),scr3+(SCN_WIDTH_CHAR*126),scr3+(SCN_WIDTH_CHAR*127),scr3+(SCN_WIDTH_CHAR*128),scr3+(SCN_WIDTH_CHAR*129)
+	DC.L	scr3+(SCN_WIDTH_CHAR*130),scr3+(SCN_WIDTH_CHAR*131),scr3+(SCN_WIDTH_CHAR*132),scr3+(SCN_WIDTH_CHAR*133),scr3+(SCN_WIDTH_CHAR*134),scr3+(SCN_WIDTH_CHAR*135),scr3+(SCN_WIDTH_CHAR*136),scr3+(SCN_WIDTH_CHAR*137),scr3+(SCN_WIDTH_CHAR*138),scr3+(SCN_WIDTH_CHAR*139)
+	DC.L	scr3+(SCN_WIDTH_CHAR*140),scr3+(SCN_WIDTH_CHAR*141),scr3+(SCN_WIDTH_CHAR*142),scr3+(SCN_WIDTH_CHAR*143),scr3+(SCN_WIDTH_CHAR*144),scr3+(SCN_WIDTH_CHAR*145),scr3+(SCN_WIDTH_CHAR*146),scr3+(SCN_WIDTH_CHAR*147),scr3+(SCN_WIDTH_CHAR*148),scr3+(SCN_WIDTH_CHAR*149)
+	DC.L	scr3+(SCN_WIDTH_CHAR*150),scr3+(SCN_WIDTH_CHAR*151),scr3+(SCN_WIDTH_CHAR*152),scr3+(SCN_WIDTH_CHAR*153),scr3+(SCN_WIDTH_CHAR*154),scr3+(SCN_WIDTH_CHAR*155),scr3+(SCN_WIDTH_CHAR*156),scr3+(SCN_WIDTH_CHAR*157),scr3+(SCN_WIDTH_CHAR*158),scr3+(SCN_WIDTH_CHAR*159)
+	DC.L	scr3+(SCN_WIDTH_CHAR*160),scr3+(SCN_WIDTH_CHAR*161),scr3+(SCN_WIDTH_CHAR*162),scr3+(SCN_WIDTH_CHAR*163),scr3+(SCN_WIDTH_CHAR*164),scr3+(SCN_WIDTH_CHAR*165),scr3+(SCN_WIDTH_CHAR*166),scr3+(SCN_WIDTH_CHAR*167),scr3+(SCN_WIDTH_CHAR*168),scr3+(SCN_WIDTH_CHAR*169)
+	DC.L	scr3+(SCN_WIDTH_CHAR*170),scr3+(SCN_WIDTH_CHAR*171),scr3+(SCN_WIDTH_CHAR*172),scr3+(SCN_WIDTH_CHAR*173),scr3+(SCN_WIDTH_CHAR*174),scr3+(SCN_WIDTH_CHAR*175),scr3+(SCN_WIDTH_CHAR*176),scr3+(SCN_WIDTH_CHAR*177),scr3+(SCN_WIDTH_CHAR*178),scr3+(SCN_WIDTH_CHAR*179)
+	DC.L	scr3+(SCN_WIDTH_CHAR*180),scr3+(SCN_WIDTH_CHAR*181),scr3+(SCN_WIDTH_CHAR*182),scr3+(SCN_WIDTH_CHAR*183),scr3+(SCN_WIDTH_CHAR*184),scr3+(SCN_WIDTH_CHAR*185),scr3+(SCN_WIDTH_CHAR*186),scr3+(SCN_WIDTH_CHAR*187),scr3+(SCN_WIDTH_CHAR*188),scr3+(SCN_WIDTH_CHAR*189)
+	DC.L	scr3+(SCN_WIDTH_CHAR*190),scr3+(SCN_WIDTH_CHAR*191),scr3+(SCN_WIDTH_CHAR*192),scr3+(SCN_WIDTH_CHAR*193),scr3+(SCN_WIDTH_CHAR*194),scr3+(SCN_WIDTH_CHAR*195),scr3+(SCN_WIDTH_CHAR*196),scr3+(SCN_WIDTH_CHAR*197),scr3+(SCN_WIDTH_CHAR*198),scr3+(SCN_WIDTH_CHAR*199)
+
+XOFFSET	DC.L 	0 ; v
+YOFFSET	DC.L 	0 ; h
+ZOFFSET	DC.L 	4000
+
+objectlinelist:
+	dc.w	0,1
+	dc.w	1,3
+	dc.w	3,2
+	dc.w	2,0	
+	dc.w	4,5
+	dc.w	5,7
+	dc.w	7,6
+	dc.w	6,4
+	dc.w	0,4
+	dc.w	1,5
+	dc.w	2,6
+	dc.w	3,7
+
+objectpointlist:
+	dc.w -32000,-32000,-32000
+	dc.w -32000,-32000,+32000
+	dc.w -32000,+32000,-32000
+	dc.w -32000,+32000,+32000
+	dc.w +32000,-32000,-32000
+	dc.w +32000,-32000,+32000
+	dc.w +32000,+32000,-32000
+	dc.w +32000,+32000,+32000
+
+	include "SINCOS2.H"
+	
+	section ChipRAM,Data_c
+
+copperlist:	dc.l	$01800000 ; COLOR00
+			dc.l	$01820FFF ; COLOR01
+			dc.l	$008e2c81,$0090f4c1 ; 2cc1		; 08e=DIWSTRT and 090=DIWSTOP ; $F4C1 320x200
+			dc.l	$00920038,$009400d0		; 092=DDFSTRT and 094=DDFSTOP
+			dc.l	$01080000;+40	; BPL1MOD ; 40 byte = 1 line / 80 = 2 lines down
+			dc.l	$010a0000;+40	; BPL2MOD ; 40 byte = 1 line / 80 = 2 lines down	
+mainbitp:	dc.l	$00e00000	; BPL1PTH
+			dc.l	$00e20000	; BPL1PTL
+			dc.l	$01001200	; BPLCON0
+			dc.l	$fffffffe
+
+;copperlist:	DC.L	$01800000 				; COLOR00
+;			DC.L	$01820FFF 				; COLOR01
+;			DC.L	$008e4881,$009010c1		; 08e=DIWSTRT and 090=DIWSTOP ; $F4C1 320x200
+;			DC.L	$0092003c,$009400d4		; 092=DDFSTRT and 094=DDFSTOP
+;			DC.L	$01080000				; BPL1MOD ; 40 byte = 1 line / 80 = 2 lines down
+;			DC.L	$010A0000				; BPL1MOD ; 40 byte = 1 line / 80 = 2 lines down
+;mainbitp:	DC.L	$00e00000				; BPL1PTH
+;			DC.L	$00e20000				; BPL1PTL
+;			DC.L	$01009200				; BPLCON0 - Hires
+;			DC.L	$fffffffe
+
+scr1:	DS.B	40*200 ;,$AA
+scr2:	DS.B	40*200 ;,$AA
+scr3:	DS.B	40*200 ;,$AA
+
+	section bss
+
+STACK_POINTER:		DC.L	0
+
+ROTATED_POINT		DS.L 256*3 ; 256 rx-ry-rz points
+PERSPECTIVE_POINT	DS.W 256*2 ; 256 px-py points
+CLIPCODE_POINT		DS.W 256		; clip codes for points list
+
+ophi	ds.w	1
+sphi	ds.w	1
+cphi	ds.w	1
